@@ -1,3 +1,5 @@
+import argparse
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -80,7 +82,7 @@ def get_aligned_bounds(shp_path: str, res: float):
 # ──────────────────────────────────────────────────────────────
 def clip_raster(
     shp_path: str,
-    raster_path: str,
+    ras_path: str,
     out_path: str,
     target_epsg: int | str,
     target_res: float,
@@ -116,11 +118,11 @@ def clip_raster(
         shp_path = _reproject_shp(shp_path, target_srs)
 
     # Raster SRS
-    ras_ds = gdal.Open(raster_path)
+    ras_ds = gdal.Open(ras_path)
     ras_srs_wkt = ras_ds.GetProjection()
     ras_srs = osr.SpatialReference(wkt=ras_srs_wkt)
 
-    tmp_raster = raster_path
+    tmp_raster = ras_path
     if not _is_same_srs(ras_srs, target_srs):
         # 临时 reproject
         tf = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
@@ -251,43 +253,140 @@ def clip_vector(
     tgt_ds, out_ds = None, None
     print(f"[OK] 裁剪完成 → {out_path}")
 
-# ──────────────────────────────────────────────────────────────
-# 使用示例
-# ──────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    # name = 'changning'
-    # name = ['changning','kangding','wenchuan','jiuzhaigou','lushan','maerkang','luding']
-    # shps = [rf"E:/SchoolWork/研究区shp/四川/长宁/changning.shp",
-    #        rf"E:/SchoolWork/研究区shp/四川/康定/kangding.shp",
-    #        rf"E:/SchoolWork/研究区shp/四川/汶川/wenchuan.shp",
-    #        rf"E:/SchoolWork/研究区shp/四川/九寨沟/九寨沟/jiuzhaigou.shp",
-    #        rf"E:/SchoolWork/研究区shp/四川/芦山/lushan.shp",
-    #        rf"E:/SchoolWork/研究区shp/四川/马尔康/maerkang.shp",
-    #        rf"E:/SchoolWork/RiskAssess-using/product/luding/VII_proj.shp"]
-    name = ['jinggu','yangbi','changning','kangding','maerkang']
-    shps = ["E:\SchoolWork\RiskAssess-using\product\jinggu\jinggu_proj.shp",
-            "E:\SchoolWork\RiskAssess-using\product\yangbi\yangbi_proj.shp",
-        rf"E:/SchoolWork/RiskAssess-using/product/changning/changningVI.shp",
-        rf"E:/SchoolWork/研究区shp/四川/长宁/changning.shp",
-        rf"E:/SchoolWork/研究区shp/四川/康定/kangding.shp",
-        rf"E:/SchoolWork/研究区shp/四川/马尔康/maerkang.shp"]
+def get_pure_basename(file_path):
+    """提取无任何扩展名的纯文件名（适配多层后缀，如 roads_density.fds.tif）"""
+    basename = os.path.basename(file_path)
+    while os.path.splitext(basename)[1]:
+        basename = os.path.splitext(basename)[0]
+    return basename
 
-    ras_folder = r"E:/SchoolWork/newLSAT-using/product/BigData"
-    ras = r"E:\SchoolWork\RiskAssess-using\product\YunnanBigData\roads_Density.tif"
-    epsg = 32647
-    res = 30  # metre/pixel
-    for i, shp in enumerate(shps[:2]):
-        print(shp)
-        out = rf"E:/SchoolWork/RiskAssess-using/product/{name[i]}"
+def load_and_validate_config(config_path):
+    """加载JSON配置文件并校验必要参数"""
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        raise Exception(f"配置文件不存在：{config_path}")
+    except json.JSONDecodeError:
+        raise Exception(f"配置文件格式错误（非有效JSON）：{config_path}")
 
-        if os.path.exists(out):
-            print("输出目录已存在")
+    # 校验核心参数
+    required_keys = {
+        "clip_type": ["raster", "vector"],
+        "obj_list": list,          # 输入路径列表（栅格/矢量路径）
+        "shp": str,                # 单个裁剪范围shp
+        "epsg": int                # 投影编码
+    }
+
+    for key, expected in required_keys.items():
+        if key not in config:
+            raise Exception(f"配置文件缺少必选参数：{key}")
+        
+        if key == "clip_type" and config[key] not in expected:
+            raise Exception(f"clip_type只能是 'raster' 或 'vector'，当前值：{config[key]}")
+        
+        if isinstance(expected, type) and not isinstance(config[key], expected):
+            raise Exception(f"{key} 类型错误，期望 {expected.__name__}，实际 {type(config[key]).__name__}")
+
+    if len(config["obj_list"]) == 0:
+        raise Exception("obj_list列表不能为空，请至少指定一个输入路径")
+
+    # 按需校验栅格专属参数
+    if config["clip_type"] == "raster":
+        raster_keys = ["res"]
+        for key in raster_keys:
+            if key not in config:
+                raise Exception(f"裁剪类型为raster时，缺少必选参数：{key}")
+        config.setdefault("resample", "bilinear")
+        config.setdefault("lock_grid", True)
+        config.setdefault("dstNodata", -9999)
+
+    # 可选参数：output_root（自定义输出根目录），无则设为None
+    config.setdefault("output_root", None)
+    
+    return config
+
+# ======================== 核心执行逻辑 =========================
+def main():
+    parser = argparse.ArgumentParser(description="基于JSON配置文件批量裁剪栅格/矢量数据（单shp裁剪范围）")
+    parser.add_argument("-c", "--config", required=True, help="JSON配置文件的绝对路径（如：E:/config.json）")
+    args = parser.parse_args()
+
+    # 加载配置
+    try:
+        config = load_and_validate_config(args.config)
+    except Exception as e:
+        print(f"配置文件加载失败：{e}")
+        return
+
+    # 提取基础参数
+    clip_type = config["clip_type"]
+    obj_list = config["obj_list"]    # 输入路径列表（栅格/矢量路径）
+    clip_shp = config["shp"]         # 单个裁剪范围shp
+    epsg = config["epsg"]
+    output_root = config["output_root"]  # 自定义输出根目录（可选）
+
+    # 统一处理单/多对象裁剪
+    for idx, input_path in enumerate(obj_list):
+        print(f"\n========== 处理第 {idx+1} / {len(obj_list)} 个对象：{input_path} ==========")
+        print(f"当前配置参数：{config}\n")
+        # 提取输入路径的纯basename（无扩展名）和输入目录
+        input_basename = get_pure_basename(input_path)
+        input_dir = os.path.dirname(input_path)
+        
+        # ========== 核心调整：双选择的输出目录逻辑 ==========
+        # 1. 判断是否有自定义输出根目录
+        if output_root and isinstance(output_root, str):
+            if not os.path.exists(output_root):
+                print(f"创建自定义输出根目录：{output_root}")
+                os.makedirs(output_root)
+            else:
+                print(f"自定义输出根目录已存在：{output_root}")
+            out_dir = output_root
         else:
-            os.makedirs(out)
-        print(name[i])
-        clip_raster(shp, ras, os.path.join(out,f'{name[i]}_denseroads.tif'), epsg, res, resample="bilinear",lock_grid=True,dstNodata=-9999)
+            print(f"未指定自定义输出根目录，默认使用输入目录：{input_dir}")
+            out_dir = input_dir
 
+        # 4.2 执行栅格裁剪
+        if clip_type == "raster":
+            # 提取栅格参数
+            res = config["res"]
+            resample = config["resample"]
+            lock_grid = config["lock_grid"]
+            dstNodata = config["dstNodata"]
+            
+            # 构建输出栅格路径：basename + "_clip.tif"
+            out_tif = os.path.join(out_dir, f"{input_basename}_clip.tif")
+            
+            # 调用clip_raster
+            clip_raster(
+                shp_path=clip_shp,
+                ras_path=input_path,       # 输入栅格路径（来自obj_list）
+                out_path=out_tif,
+                target_epsg=epsg,
+                target_res=res,
+                resample=resample,
+                lock_grid=lock_grid,
+                dstNodata=dstNodata
+            )
 
+        # 4.3 执行矢量裁剪
+        elif clip_type == "vector":
+            # 构建输出矢量路径：basename + "_clip.shp"
+            out_shp = os.path.join(out_dir, f"{input_basename}_clip.shp")
+            
+            # 调用clip_vector
+            clip_vector(
+                clip_shp=clip_shp,
+                clipped_shp=input_path,  # 输入矢量路径（来自obj_list）
+                output_path=out_shp,
+                target_epsg=epsg
+            )
+
+    print("\n========== 所有裁剪任务执行完成 ==========")
+
+if __name__ == "__main__":
+    main()
  
     # batch_clip_raster(ras_folder,shp,out,name,epsg,res,"nearest",True,-9999)
     # output_shp = rf"E:/SchoolWork/newLSAT-using/output/{name}/{name}_lsp.shp"

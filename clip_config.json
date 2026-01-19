@@ -1,0 +1,13 @@
+{
+    "clip_type": "raster",
+    "obj_list": [
+        "E:/SchoolWork/RiskAssess-using/product/YunnanBigData/roads_Density.tif"
+    ],
+    "shp": "E:/SchoolWork/RiskAssess-using/product/jinggu/jinggu_proj.shp",
+    "epsg": 32647,
+    "res": 30,
+    "output_root": null,
+    "resample": "bilinear",
+    "lock_grid": true,
+    "dstNodata": -9999
+}
