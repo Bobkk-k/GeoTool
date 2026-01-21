@@ -17,45 +17,60 @@ def _is_same_srs(srs1: osr.SpatialReference, srs2: osr.SpatialReference) -> bool
 # ──────────────────────────────────────────────────────────────
 # 帮助函数：转投影 shapefile，返回新路径
 # ──────────────────────────────────────────────────────────────
-def _reproject_shp(shp_path: str, target_srs: osr.SpatialReference) -> str:
-    driver = ogr.GetDriverByName("ESRI Shapefile")
-    tf = tempfile.NamedTemporaryFile(suffix=".shp", delete=False)
-    tmp_shp = tf.name
-    tf.close()
 
-    # ogr2ogr in-memory 等价
-    src_ds = driver.Open(shp_path, 0)
-    src_layer = src_ds.GetLayer()
-    src_srs = src_layer.GetSpatialRef()
+def project_study_area(study_area_path,target_srs,output_path):
+        # 定义目标分辨率和坐标系
 
-    dst_ds = driver.CreateDataSource(tmp_shp)
-    dst_layer = dst_ds.CreateLayer(
-        src_layer.GetName(), srs=target_srs, geom_type=src_layer.GetGeomType()
-    )
 
-    coord_trans = osr.CoordinateTransformation(src_srs, target_srs)
+    study_area_ds = ogr.Open(study_area_path)
+    study_area_layer = study_area_ds.GetLayer()
+    study_area_srs = study_area_layer.GetSpatialRef()
 
-    # 拷贝字段
-    src_layer_defn = src_layer.GetLayerDefn()
-    for i in range(src_layer_defn.GetFieldCount()):
-        fld_defn = src_layer_defn.GetFieldDefn(i)
-        dst_layer.CreateField(fld_defn)
+    if study_area_srs.IsSame(target_srs):
+        return study_area_path
+    
+    drv = ogr.GetDriverByName("ESRI Shapefile")
+    if os.path.exists(output_path):
+        drv.DeleteDataSource(output_path)
 
-    # 拷贝要素
-    for feat in src_layer:
-        geom = feat.GetGeometryRef().Clone()
+    # ③ 打开源数据集，创建目标图层
+    src_ds   = drv.Open(study_area_path, 0)          # 只读
+    src_lyr  = src_ds.GetLayer()
+    geomtype = src_lyr.GetGeomType()                 # 保持原来几何类型
+    dst_ds   = drv.CreateDataSource(output_path)
+    dst_lyr  = dst_ds.CreateLayer(src_lyr.GetName(),srs=target_srs,geom_type=geomtype)
+
+    # ④ 复制字段结构
+    src_defn = src_lyr.GetLayerDefn()
+    for i in range(src_defn.GetFieldCount()):
+        dst_lyr.CreateField(src_defn.GetFieldDefn(i))
+    dst_defn = dst_lyr.GetLayerDefn()
+
+    # ⑤ 坐标转换器
+    coord_trans = osr.CoordinateTransformation(study_area_srs, target_srs)
+
+    # ⑥ 遍历要素并写入
+    for src_feat in src_lyr:
+        geom = src_feat.GetGeometryRef().Clone()
         geom.Transform(coord_trans)
 
-        dst_feat = ogr.Feature(dst_layer.GetLayerDefn())
+        dst_feat = ogr.Feature(dst_defn)
         dst_feat.SetGeometry(geom)
-        for i in range(src_layer_defn.GetFieldCount()):
-            dst_feat.SetField(i, feat.GetField(i))
-        dst_layer.CreateFeature(dst_feat)
-        dst_feat = None
 
-    # 清理
-    src_ds, dst_ds = None, None
-    return tmp_shp
+        # 复制属性字段
+        for i in range(dst_defn.GetFieldCount()):
+            field_name = dst_defn.GetFieldDefn(i).GetNameRef()
+            dst_feat.SetField(field_name, src_feat.GetField(field_name))
+
+        dst_lyr.CreateFeature(dst_feat)
+        dst_feat = None  # 释放
+
+    # ⑦ 关闭数据集
+    src_ds = None
+    dst_ds = None
+
+    # ⑧ 返回重投影后 Shapefile 的主文件路径
+    return output_path
 
 
 # ──────────────────────────────────────────────────────────────
@@ -115,7 +130,8 @@ def clip_raster(
     shp_srs = shp_layer.GetSpatialRef()
 
     if not _is_same_srs(shp_srs, target_srs):
-        shp_path = _reproject_shp(shp_path, target_srs)
+        proj_path = os.path.join(os.path.dirname(shp_path),f"{os.path.splitext(os.path.basename(shp_path))[0]}_proj.shp")
+        shp_path = project_study_area(shp_path,target_srs,proj_path)
 
     # Raster SRS
     ras_ds = gdal.Open(ras_path)
@@ -179,12 +195,12 @@ def clip_raster(
     ras_ds, shp_ds = None, None
     # 临时文件可按需删除；这里保留以便调试
 
-def batch_clip_raster(folder_path,shp_path,output_folder,suffix,target_epsg,target_res,resample,lock_grid,dstNodata):
+def batch_clip_raster(folder_path,shp_path,output_folder,target_epsg,target_res,resample,lock_grid,dstNodata):
     for root, dirs, files in os.walk(folder_path):
         for file in tqdm(files):
             if file.endswith(".tif"):
                 raster_path = os.path.join(root, file)
-                file_clip = file.replace(".tif",f"_{suffix}.tif")
+                file_clip = file.replace(".tif",f"_clip.tif")
                 out_path = os.path.join(output_folder, file_clip)
                 clip_raster(shp_path, raster_path, out_path, target_epsg, target_res, resample, lock_grid,dstNodata)
 
@@ -205,7 +221,9 @@ def clip_vector(
     clip_ds  = drv.Open(clip_shp)
     clip_lyr = clip_ds.GetLayer()
     if not _is_same_srs(clip_lyr.GetSpatialRef(), target_srs):
-        clip_shp = _reproject_shp(clip_shp, target_srs)
+        proj_path = os.path.join(os.path.dirname(out_path),f"{os.path.splitext(os.path.basename(clip_shp))[0]}_proj.shp")
+        clip_shp = project_study_area(clip_shp,target_srs,proj_path)
+
         clip_ds  = drv.Open(clip_shp)
         clip_lyr = clip_ds.GetLayer()
 
@@ -220,7 +238,8 @@ def clip_vector(
     tgt_ds  = drv.Open(clipped_shp)
     tgt_lyr = tgt_ds.GetLayer()
     if not _is_same_srs(tgt_lyr.GetSpatialRef(), target_srs):
-        clipped_shp = _reproject_shp(clipped_shp, target_srs)
+        proj_path = os.path.join(os.path.dirname(out_path),f"{os.path.splitext(os.path.basename(clipped_shp))[0]}_proj.shp")
+        clipped_shp = project_study_area(clipped_shp,target_srs,proj_path)
         tgt_ds  = drv.Open(clipped_shp)
         tgt_lyr = tgt_ds.GetLayer()
 
@@ -273,7 +292,7 @@ def load_and_validate_config(config_path):
     # 校验核心参数
     required_keys = {
         "clip_type": ["raster", "vector"],
-        "obj_list": list,          # 输入路径列表（栅格/矢量路径）
+        "path_type": ["folder", "file"],
         "shp": str,                # 单个裁剪范围shp
         "epsg": int                # 投影编码
     }
@@ -303,7 +322,12 @@ def load_and_validate_config(config_path):
 
     # 可选参数：output_root（自定义输出根目录），无则设为None
     config.setdefault("output_root", None)
-    
+    if config["path_type"] == "folder":
+        if "obj_folder" not in config:
+            raise Exception(f"配置文件缺少必选参数：obj_folder")
+    elif config["path_type"] == "file":
+        if "obj_list" not in config:
+            raise Exception(f"配置文件缺少必选参数：obj_list")
     return config
 
 # ======================== 核心执行逻辑 =========================
@@ -321,67 +345,82 @@ def main():
 
     # 提取基础参数
     clip_type = config["clip_type"]
-    obj_list = config["obj_list"]    # 输入路径列表（栅格/矢量路径）
+    path_type = config["path_type"]
     clip_shp = config["shp"]         # 单个裁剪范围shp
     epsg = config["epsg"]
     output_root = config["output_root"]  # 自定义输出根目录（可选）
+    if clip_type == "raster":
+        res = config["res"]
+        resample = config["resample"]
+        lock_grid = config["lock_grid"]
+        dstNodata = config["dstNodata"]
+        if path_type == "file":
+            # 统一处理单/多对象裁剪
+            obj_list = config["obj_list"]    # 输入路径列表（栅格/矢量路径）
+            for idx, input_path in enumerate(obj_list):
+                print(f"\n========== 处理第 {idx+1} / {len(obj_list)} 个对象：{input_path} ==========")
+                print(f"当前配置参数：{config}\n")
+                # 提取输入路径的纯basename（无扩展名）和输入目录
+                input_basename = get_pure_basename(input_path)
+                input_dir = os.path.dirname(input_path)
+                
+                # ========== 核心调整：双选择的输出目录逻辑 ==========
+                # 1. 判断是否有自定义输出根目录
+                if output_root and isinstance(output_root, str):
+                    if not os.path.exists(output_root):
+                        print(f"创建自定义输出根目录：{output_root}")
+                        os.makedirs(output_root)
+                    else:
+                        print(f"自定义输出根目录已存在：{output_root}")
+                    out_dir = output_root
+                else:
+                    print(f"未指定自定义输出根目录，默认使用输入目录：{input_dir}")
+                    out_dir = input_dir
 
-    # 统一处理单/多对象裁剪
-    for idx, input_path in enumerate(obj_list):
-        print(f"\n========== 处理第 {idx+1} / {len(obj_list)} 个对象：{input_path} ==========")
-        print(f"当前配置参数：{config}\n")
-        # 提取输入路径的纯basename（无扩展名）和输入目录
-        input_basename = get_pure_basename(input_path)
-        input_dir = os.path.dirname(input_path)
-        
-        # ========== 核心调整：双选择的输出目录逻辑 ==========
-        # 1. 判断是否有自定义输出根目录
-        if output_root and isinstance(output_root, str):
-            if not os.path.exists(output_root):
-                print(f"创建自定义输出根目录：{output_root}")
-                os.makedirs(output_root)
+                    
+                # 构建输出栅格路径：basename + "_clip.tif"
+                out_tif = os.path.join(out_dir, f"{input_basename}_clip.tif")
+                    
+                # 调用clip_raster
+                clip_raster(
+                    shp_path=clip_shp,
+                    ras_path=input_path,       # 输入栅格路径（来自obj_list）
+                    out_path=out_tif,
+                    target_epsg=epsg,
+                    target_res=res,
+                    resample=resample,
+                    lock_grid=lock_grid,
+                    dstNodata=dstNodata
+                )
+
+                # 4.3 执行矢量裁剪
+        elif path_type == "folder":
+            obj_folder = config["obj_folder"]    # 输入路径列表（栅格/矢量路径）
+            if output_root and isinstance(output_root, str):
+                if not os.path.exists(output_root):
+                    print(f"创建自定义输出根目录：{output_root}")
+                    os.makedirs(output_root)
+                else:
+                    print(f"自定义输出根目录已存在：{output_root}")
+                out_dir = output_root
             else:
-                print(f"自定义输出根目录已存在：{output_root}")
-            out_dir = output_root
-        else:
-            print(f"未指定自定义输出根目录，默认使用输入目录：{input_dir}")
-            out_dir = input_dir
+                print(f"未指定自定义输出根目录，默认使用输入目录：{input_dir}")
+                out_dir = input_dir
+            batch_clip_raster(obj_folder,clip_shp,out_dir,epsg,res,"nearest",True,-9999)
 
-        # 4.2 执行栅格裁剪
-        if clip_type == "raster":
-            # 提取栅格参数
-            res = config["res"]
-            resample = config["resample"]
-            lock_grid = config["lock_grid"]
-            dstNodata = config["dstNodata"]
-            
-            # 构建输出栅格路径：basename + "_clip.tif"
-            out_tif = os.path.join(out_dir, f"{input_basename}_clip.tif")
-            
-            # 调用clip_raster
-            clip_raster(
-                shp_path=clip_shp,
-                ras_path=input_path,       # 输入栅格路径（来自obj_list）
-                out_path=out_tif,
-                target_epsg=epsg,
-                target_res=res,
-                resample=resample,
-                lock_grid=lock_grid,
-                dstNodata=dstNodata
-            )
+    elif clip_type == "vector":
+        # 构建输出矢量路径：basename + "_clip.shp"
+        out_shp = os.path.join(out_dir, f"{input_basename}_clip.shp")
+        
+        # 调用clip_vector
+        clip_vector(
+            clip_shp=clip_shp,
+            clipped_shp=input_path,  # 输入矢量路径（来自obj_list）
+            output_path=out_shp,
+            target_epsg=epsg
+        )
+        
 
-        # 4.3 执行矢量裁剪
-        elif clip_type == "vector":
-            # 构建输出矢量路径：basename + "_clip.shp"
-            out_shp = os.path.join(out_dir, f"{input_basename}_clip.shp")
-            
-            # 调用clip_vector
-            clip_vector(
-                clip_shp=clip_shp,
-                clipped_shp=input_path,  # 输入矢量路径（来自obj_list）
-                output_path=out_shp,
-                target_epsg=epsg
-            )
 
     print("\n========== 所有裁剪任务执行完成 ==========")
 
