@@ -1,13 +1,16 @@
 {
     "clip_type": "raster",
     "obj_list": [
-        "E:/SchoolWork/RiskAssess-using/product/YunnanBigData/roads_Density.tif"
+        "/path/to/obj1.tif",
+        "/path/to/obj2.tif"
     ],
-    "shp": "E:/SchoolWork/RiskAssess-using/product/jinggu/jinggu_proj.shp",
+    "path_type": "folder",
+    "obj_folder": "/path/to/obj_folder",
+    "shp": "/path/to/clip.shp",
     "epsg": 32647,
     "res": 30,
-    "output_root": null,
-    "resample": "bilinear",
+    "output_root": "/path/to/output_folder",
+    "resample": "nearest",
     "lock_grid": true,
     "dstNodata": -9999
 }
