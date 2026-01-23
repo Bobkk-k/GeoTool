@@ -221,7 +221,7 @@ def clip_vector(
     clip_ds  = drv.Open(clip_shp)
     clip_lyr = clip_ds.GetLayer()
     if not _is_same_srs(clip_lyr.GetSpatialRef(), target_srs):
-        proj_path = os.path.join(os.path.dirname(out_path),f"{os.path.splitext(os.path.basename(clip_shp))[0]}_proj.shp")
+        proj_path = os.path.join(os.path.dirname(clip_shp),f"{os.path.splitext(os.path.basename(clip_shp))[0]}_proj.shp")
         clip_shp = project_study_area(clip_shp,target_srs,proj_path)
 
         clip_ds  = drv.Open(clip_shp)
@@ -238,7 +238,7 @@ def clip_vector(
     tgt_ds  = drv.Open(clipped_shp)
     tgt_lyr = tgt_ds.GetLayer()
     if not _is_same_srs(tgt_lyr.GetSpatialRef(), target_srs):
-        proj_path = os.path.join(os.path.dirname(out_path),f"{os.path.splitext(os.path.basename(clipped_shp))[0]}_proj.shp")
+        proj_path = os.path.join(os.path.dirname(clip_shp),f"{os.path.splitext(os.path.basename(clipped_shp))[0]}_proj.shp")
         clipped_shp = project_study_area(clipped_shp,target_srs,proj_path)
         tgt_ds  = drv.Open(clipped_shp)
         tgt_lyr = tgt_ds.GetLayer()
